@@ -1,0 +1,14 @@
+[project]
+name = "docpilot-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Harshavardhan Vadluri", email = "iiharsha10@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+add-bounds = "exact"
+exclude-newer = "7 days"
