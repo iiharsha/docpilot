@@ -162,7 +162,8 @@ backend/app/
 │   └── validator.py            # Ensures citations map to retrieved passages
 └── database/
     ├── supabase.py             # Supabase client construction
-    ├── models.py               # SQLAlchemy table models used by Alembic autogenerate
+    ├── models/                 # SQLAlchemy table models used by Alembic autogenerate,
+    │                           # one module per table over a shared `base.py`
     ├── chats.py                # Chat, thread, message, and citation persistence
     └── documents.py            # Source document, chunk, embedding, and search queries
 ```
@@ -272,12 +273,14 @@ Streaming responsibilities:
 
 Supabase tables should be small and product-oriented:
 
-- `profiles`: one row per authenticated user, keyed by Supabase `auth.users.id`.
+- `users`: one row per authenticated user in `public`, keyed by Supabase `auth.users.id`.
 - `chat_threads`: thread metadata, owner, title, timestamps.
 - `chat_messages`: user and assistant messages in order, with AI SDK-compatible message JSON where useful.
 - `message_citations`: normalized citation records linked to assistant messages.
 - `source_documents`: original document records with filing metadata, source URL, and normalized Markdown content.
 - `document_chunks`: chunk text, chunk metadata, embeddings, and generated full-text search vectors.
+
+A `public.users` row is created by a backend upsert on the first authenticated request, not by a database trigger on `auth.users`. The upsert is testable without a live Supabase instance, and it keeps row creation in the same code path that already validates the JWT. `public.users.id` is a foreign key to `auth.users.id` with `on delete cascade`, so deleting the auth user removes the application row and everything owned by it.
 
 `source_documents` stores the normalized Markdown version of each filing so the application can re-chunk, inspect, and cite the original extracted text without reaching back into downloaded HTML files. `document_chunks` stores retrieval-ready passages:
 
@@ -299,7 +302,7 @@ Database schema changes are managed from the backend with SQLAlchemy models and 
 
 The workflow is:
 
-1. Update SQLAlchemy models in `app/database/models.py`.
+1. Update SQLAlchemy models in `app/database/models/`.
 2. Generate a candidate migration with `uv run alembic revision --autogenerate -m "<change>"`.
 3. Review the generated migration file in `backend/alembic/versions/`.
 4. Add explicit migration operations for Postgres/Supabase features that autogenerate cannot infer reliably.

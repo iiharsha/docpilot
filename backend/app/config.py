@@ -22,7 +22,8 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_embedding_model: str = "text-embedding-3-small"
-    openai_embedding_dimensions: int = 1536
+    # Embedding width is not configurable here: it is a column type.
+    # See `app.database.models.constants.EMBEDDING_DIMENSIONS`.
 
     # Comma-separated in .env; use `cors_origins` for the parsed list.
     allowed_origins: str = "http://localhost:5173"
