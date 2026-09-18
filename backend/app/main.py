@@ -2,12 +2,15 @@
 
 import logging
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.database.supabase import create_service_client
 
 
 def configure_logging() -> None:
@@ -35,7 +38,16 @@ def configure_logging() -> None:
 
 configure_logging()
 
-app = FastAPI(title="Docpilot API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # One privileged client per process. Construction is local — it opens no
+    # connection — so startup does not depend on Supabase being reachable.
+    app.state.supabase_service = await create_service_client()
+    yield
+
+
+app = FastAPI(title="Docpilot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
