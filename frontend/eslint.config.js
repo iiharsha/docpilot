@@ -19,4 +19,11 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    // shadcn primitives are generated, not hand-written: they export variant
+    // helpers next to the component, and `shadcn add` rewrites the file, so
+    // editing them to satisfy fast refresh would not survive.
+    files: ['src/components/ui/**'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
 ])
