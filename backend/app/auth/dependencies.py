@@ -12,11 +12,14 @@ import httpx
 import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, ConfigDict
 from supabase import AsyncClient
 from supabase_auth.errors import AuthApiError, AuthError
 
 from app.database.supabase import create_user_client
+from app.database.users import upsert_user
+from app.dependencies import ServiceClient
 
 log = structlog.get_logger(__name__)
 
@@ -65,6 +68,7 @@ async def get_user_client(
 async def get_current_user(
     access_token: Annotated[str, Depends(get_access_token)],
     client: Annotated[AsyncClient, Depends(get_user_client)],
+    service_client: ServiceClient,
 ) -> AuthenticatedUser:
     """Verify the bearer token against Supabase Auth and identify the caller."""
     try:
@@ -88,7 +92,20 @@ async def get_current_user(
     if not response.user.email:
         raise _unauthorized("Account has no email address")
 
-    return AuthenticatedUser(id=response.user.id, email=response.user.email)
+    user = AuthenticatedUser(id=response.user.id, email=response.user.email)
+
+    # `public.users` is provisioned here rather than by a trigger on
+    # `auth.users`, per the decision recorded in architecture.md. Nothing the
+    # caller can do works without the row: `chat_threads.user_id` references it.
+    try:
+        await upsert_user(service_client, user.id, user.email)
+    except APIError as exc:
+        log.warning("user_upsert_failed", user_id=str(user.id), error=str(exc))
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Could not load your account"
+        ) from exc
+
+    return user
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]

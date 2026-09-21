@@ -6,43 +6,27 @@
  * an undefined URL in a fetch call.
  */
 
-type EnvKey = 'VITE_API_BASE_URL' | 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY'
-
-const REQUIRED: EnvKey[] = [
-  'VITE_API_BASE_URL',
-  'VITE_SUPABASE_URL',
-  'VITE_SUPABASE_ANON_KEY',
-]
-
-function readRequired(): Record<EnvKey, string> {
-  const source = import.meta.env as Record<string, string | undefined>
-  const values = {} as Record<EnvKey, string>
-  const missing: EnvKey[] = []
-
-  for (const key of REQUIRED) {
-    const value = source[key]?.trim()
-    if (value) {
-      values[key] = value
-    } else {
-      missing.push(key)
-    }
-  }
-
-  if (missing.length > 0) {
-    throw new Error(
-      `Missing frontend environment variables: ${missing.join(', ')}. ` +
-        'Copy frontend/.env.example to frontend/.env and fill in the values.',
-    )
-  }
-
-  return values
+const raw = {
+  VITE_API_BASE_URL: import.meta.env.VITE_API_BASE_URL,
+  VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
+  VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY,
 }
 
-const values = readRequired()
+const missing = Object.entries(raw)
+  .filter(([, v]) => !v?.trim())
+  .map(([k]) => k)
+
+if (missing.length) {
+  throw new Error(
+    `Missing frontend environment variables: ${missing.join(', ')}. ` +
+      'Copy frontend/.env.example to frontend/.env and fill in the values.',
+  )
+}
+
+const stripSlash = (s: string) => s.trim().replace(/\/+$/, '')
 
 export const env = {
-  // Trailing slashes stripped so callers can join paths without doubling them.
-  apiBaseUrl: values.VITE_API_BASE_URL.replace(/\/+$/, ''),
-  supabaseUrl: values.VITE_SUPABASE_URL.replace(/\/+$/, ''),
-  supabaseAnonKey: values.VITE_SUPABASE_ANON_KEY,
+  apiBaseUrl: stripSlash(raw.VITE_API_BASE_URL!),
+  supabaseUrl: stripSlash(raw.VITE_SUPABASE_URL!),
+  supabaseAnonKey: raw.VITE_SUPABASE_ANON_KEY!.trim(),
 } as const
