@@ -55,11 +55,21 @@ export default function Conversation({
     onFinish: () => void threads.refresh(),
   })
 
+  // Deferred a tick, and marked sent only once it really is. `useChat` stops its
+  // chat on unmount, which aborts a send still in flight — and StrictMode
+  // unmounts every component once, synchronously, right after its first
+  // effects run. Sent directly, the question was aborted there and the guard
+  // then refused to resend it: the thread got no answer and showed no error.
+  // Deferred, that unmount cancels the timer instead, and the remount's own
+  // timer is the one that sends.
   const sentPending = useRef(false)
   useEffect(() => {
     if (sentPending.current || !pendingText) return
-    sentPending.current = true
-    void sendMessage({ text: pendingText })
+    const timer = setTimeout(() => {
+      sentPending.current = true
+      void sendMessage({ text: pendingText })
+    })
+    return () => clearTimeout(timer)
   }, [pendingText, sendMessage])
 
   // Follow the answer as it streams.

@@ -8,8 +8,9 @@ Two clients, kept deliberately separate:
   request and never share it between users.
 - `create_service_client` uses the service-role key, which bypasses RLS
   entirely. Built once at startup and kept on `app.state.supabase_service`.
-  It is only for work a user's own token cannot do: the `users` upsert on
-  first sign-in, and ingestion writes.
+  It is only for work a user's own token cannot do, such as the `users` upsert
+  on first sign-in. Ingestion does not use it: replacing a filing's chunks has
+  to be one transaction, so `ingest/store.py` writes over `DATABASE_URL`.
 
 This module is the only place the service-role key is read. It must never be
 sent to the browser, written to a log, or accepted as a user access token.

@@ -64,5 +64,12 @@ Edit the params at the top of `data/download.py`, especially `USER_AGENT`, then 
 uv run data/download.py
 ```
 
-By default this downloads the latest 5 10-K filings for AAPL, MSFT, NVDA, AMZN, and GOOGL into year folders under `data/downloads/` and writes a `manifest.json`.
-Downloaded files are gitignored; the `data/` folder itself stays in git for the script and notes.
+By default this downloads the FY2021–2025 10-K filings for AAPL, MSFT, NVDA, AMZN, and GOOGL into year folders under `data/downloads/` and writes a `manifest.json`.
+Downloaded files are gitignored; the `data/` folder itself stays in git for the script and notes. Keep your `USER_AGENT` contact out of commits.
+
+Then load the filings into the database — Markdown, chunks and embeddings — from `backend/`:
+
+```bash
+uv run python -m ingest --dry-run   # parse and chunk only; prints what each filing produced
+uv run python -m ingest             # embed and store all 25 (a few minutes, about $0.04)
+```

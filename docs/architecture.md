@@ -69,7 +69,8 @@ Backend:
 - PydanticAI for typed LLM orchestration
 - OpenAI SDK for generation and embeddings
 - Supabase Python client for server-side database access
-- SQLAlchemy models + Alembic migrations for schema management
+- SQLAlchemy models + Alembic migrations for schema management; SQLAlchemy
+  also carries ingestion's writes (see [Corpus Ingestion](#corpus-ingestion))
 - Supabase `pgvector` for semantic search
 - Postgres full-text search for lexical retrieval
 - `httpx` for outbound HTTP
@@ -169,8 +170,11 @@ backend/app/
     ├── models/                 # SQLAlchemy table models used by Alembic autogenerate,
     │                           # one module per table over a shared `base.py`
     ├── chats.py                # Chat, thread, message, and citation persistence
-    └── documents.py            # Source document, chunk, embedding, and search queries
+    └── documents.py            # Source document and chunk reads, and search queries
 ```
+
+Ingestion is not part of the app: it is a CLI in `backend/ingest/`, beside `app/`
+(see [Corpus Ingestion](#corpus-ingestion)).
 
 These names should follow the product workflow rather than a generic service layer. `chat/orchestrator.py` owns the full turn lifecycle, `assistant/agent.py` owns the LLM boundary, `retrieval/` owns hybrid source-passage search, and `grounding/` owns the trust contract that answers must cite retrieved evidence.
 
@@ -200,6 +204,57 @@ The agent's instructions should encode the product contract:
 - Keep answers concise enough for analyst review, but include enough cited passages to verify the answer.
 
 Retrieval and grounding remain independent from PydanticAI. This keeps ingestion, retrieval tests, and citation validation testable without invoking the LLM.
+
+## Corpus Ingestion
+
+`backend/ingest/` turns the downloaded filings into what retrieval searches. Run
+it from `backend/` after `uv run data/download.py`:
+`uv run python -m ingest [--ticker AAPL] [--dry-run]`.
+
+```text
+data/downloads/*.htm      inline-XBRL XHTML, one 10-K each
+  → xhtml.py, tables.py   normalized Markdown        → source_documents.markdown
+  → chunker.py            chunks, a pure function of that Markdown
+  → embed.py              text-embedding-3-small     → document_chunks.embedding
+  → store.py              one transaction per filing
+```
+
+- **The Markdown is the contract.** It is stored, and the chunker reads nothing
+  else, so chunking can be re-tuned without the HTML. Its format — Item headings,
+  page markers, table blocks — is specified in `ingest/markdown.py`.
+- **The citation unit is the Item section plus the printed page.** `section` is
+  the 10-K Item ("Item 7. Management's Discussion and …"), titled from a fixed
+  table so every filer reads the same. `page` is the number the filing prints in
+  that page's own footer — `"23"`, `"F-12"`, or `"22–23"` for a chunk that runs
+  across a page break — and null where a page prints none. It is never counted
+  or guessed, so an analyst can turn to it in the filing.
+- **Chunks never cross an Item.** About 500 tokens, 800 at most, overlapping by
+  whole sentences. A table stays whole under the maximum; a larger one is split
+  by rows, and each piece repeats the header and the group label ("North
+  America") its rows sit under. Text before Item 1 — the cover page and table
+  of contents — is stored but not chunked.
+- **Every chunk can be checked against its filing.** `content` is a short prefix
+  (a repeated table header, or nothing), then one contiguous stretch of the
+  stored Markdown: `content[prefix_len:] == strip_markers(markdown[start:end])`,
+  with `prefix_len`, `start` and `end` kept in the chunk's metadata.
+  `chunker.verify` holds every chunk to that, and to the Item its offsets fall
+  in, before anything is stored.
+- **A filing that fails a check is not stored.** A missing Item heading, or page
+  labels that skip backwards or cover under 90% of pages, raises `FilingError`;
+  the run reports the filing and moves on. Sections that were quietly wrong
+  would still produce confident, well-cited answers.
+- **Embeddings see a context line** ("Apple Inc. — 10-K FY2024 — Item 7. …")
+  that `content` does not hold, so a passage that never names its company or
+  year still matches a question that does, while full-text search and citations
+  see only the passage.
+- **Writes use SQLAlchemy over `DATABASE_URL`, not PostgREST.** Replacing a filing
+  is an upsert on `accession_number`, a delete of its chunks and an insert of the
+  new ones, which must commit together; PostgREST gives each request a
+  transaction of its own. The upsert keeps the document's id, so past citations
+  keep their `document_id` (their `chunk_id` goes null, and they render from
+  their own copy of the passage). A full run ends with `VACUUM ANALYZE`.
+- **Re-embedding is a command.** The 25-filing sample is ~4,200 chunks and ~1.7M
+  tokens: a full run takes a few minutes and costs about $0.04 in embeddings.
 
 ## Retrieval Strategy
 
@@ -241,7 +296,7 @@ Recommended backend units:
 - `app/auth/dependencies.py` validates bearer tokens and exposes `get_current_user`.
 - `app/database/supabase.py` creates user-scoped and admin Supabase clients.
 - `app/database/chats.py` stores and reads chat threads, messages, and citation records.
-- `app/database/documents.py` stores and reads source documents, chunks, embeddings, and full-text search data.
+- `app/database/documents.py` reads source documents and chunks for retrieval; `ingest/store.py` writes them.
 
 ## Streaming Contract
 
@@ -341,13 +396,13 @@ A `public.users` row is created by a backend upsert on the first authenticated r
 
 - chunk ID
 - document ID
-- chunk index
-- page or section metadata
+- chunk index, contiguous within a document
+- `section` (the 10-K Item) and `page` (the printed page label, or null) — the citation unit, see [Corpus Ingestion](#corpus-ingestion)
 - chunk text
 - embedding vector
 - generated `tsvector` for full-text search
 - token count
-- metadata JSON for ticker, company, filing type, filing date, year, accession number, page, section, and source offsets
+- metadata JSON: the retrieval filters `ticker`, `company`, `form_type`, `fiscal_year` (an integer — JSONB `@>` compares types) and `accession`; `chunk_type` (`text` or `table`), with `table_part` / `table_parts` on the pieces of a split table; and the source offsets `prefix_len`, `start`, `end`
 
 Hybrid retrieval runs two bounded queries against `document_chunks`: a semantic `pgvector` query and a Postgres full-text query. The backend fuses those ranked lists with Reciprocal Rank Fusion, then fetches the selected chunks and neighboring context for grounding.
 

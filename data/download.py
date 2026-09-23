@@ -32,7 +32,10 @@ COMPANY_CIKS = {
 }
 
 FORM = "10-K"
-FILINGS_PER_COMPANY = 5
+# The brief's questions span FY2021–2025. Pinned: deriving the range from
+# today's date would silently drop FY2021 from January 2027.
+FISCAL_YEARS = {"2021", "2022", "2023", "2024", "2025"}
+FILINGS_PER_COMPANY = len(FISCAL_YEARS)
 
 # SEC allows 10 requests/second; one request per interval stays well under.
 REQUEST_INTERVAL = 0.2
@@ -56,16 +59,6 @@ def fetch(url: str, accept: str) -> bytes:
 
 def fetch_json(url: str) -> dict:
     return json.loads(fetch(url, "application/json"))
-
-
-def target_years() -> set[str]:
-    """The FILINGS_PER_COMPANY fiscal years ending before the current one.
-
-    The current year is excluded because its 10-K is usually not filed yet.
-    """
-    current_year = datetime.now(UTC).year
-    first_year = current_year - FILINGS_PER_COMPANY
-    return {str(year) for year in range(first_year, current_year)}
 
 
 def select_filings(index: dict, years: set[str]) -> list[dict]:
@@ -156,16 +149,20 @@ def main() -> None:
             "SEC EDGAR rejects anonymous requests with 403."
         )
 
-    if CLEAR_OUTPUT_DIR and OUTPUT_DIR.exists():
-        shutil.rmtree(OUTPUT_DIR)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if CLEAR_OUTPUT_DIR:
+        # `.gitkeep` is tracked: it keeps the gitignored folder in the repo.
+        for child in OUTPUT_DIR.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            elif child.name != ".gitkeep":
+                child.unlink()
 
-    years = target_years()
     records = []
     for ticker in TICKERS:
         print(f"Downloading {ticker} filings...")
         cik = COMPANY_CIKS[ticker]
-        filings = find_filings(cik, years)
+        filings = find_filings(cik, FISCAL_YEARS)
         if len(filings) < FILINGS_PER_COMPANY:
             print(f"  only {len(filings)} of {FILINGS_PER_COMPANY} found")
         records.extend(download(ticker, cik, filing) for filing in filings)
