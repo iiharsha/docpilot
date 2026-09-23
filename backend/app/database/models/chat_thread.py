@@ -26,10 +26,14 @@ class ChatThread(Base):
     )
     title: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = now_timestamp()
+    # No `onupdate=`: that is applied by the ORM in Python, and every write in
+    # this service goes through PostgREST, so it never fired. Migrations 0002
+    # and 0003 move this column with triggers — on any update of this table, and
+    # on an insert into `chat_messages` — which is the only place the rule holds
+    # for every writer. `ix_chat_threads_user_id_updated_at` orders on it.
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
         nullable=False,
     )
 

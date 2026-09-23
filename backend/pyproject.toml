@@ -35,6 +35,12 @@ packages = ["app"]
 # package as first-party.
 known-third-party = ["alembic"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs live Supabase or OpenAI credentials, so it is excluded from the fast suite by `-m \"not integration\"`",
+]
+
 [tool.uv]
 add-bounds = "exact"
 exclude-newer = "7 days"

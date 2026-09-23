@@ -142,7 +142,11 @@ Recommended backend modules:
 ```text
 backend/app/
 ├── api/
-│   └── chat.py                 # FastAPI routes for chat threads and streaming
+│   ├── chat.py                 # POST /chat/stream
+│   └── threads.py              # Thread list/create/history, and the ownership guard
+│                               # `/chat/stream` reuses. Split out of chat.py: the
+│                               # thread routes are plain JSON CRUD and share nothing
+│                               # with streaming but that guard.
 ├── auth/
 │   └── dependencies.py         # Supabase JWT verification and current user dependency
 ├── chat/
@@ -260,14 +264,65 @@ Request body:
 }
 ```
 
-The `messages` payload should use the AI SDK UI message format at the frontend boundary. FastAPI can translate that wire format into internal Pydantic models before invoking the agent.
+The `messages` payload uses the AI SDK UI message format. Only the last user
+message is read: the thread's history lives in Postgres, and rebuilding a prompt
+from the browser's copy would let a caller rewrite what was previously asked and
+answered through a request body. The SDK also sends `id`, `trigger` and
+`messageId`, which describe a chat session the backend does not track; they are
+ignored.
+
+Response headers:
+
+```text
+content-type: text/event-stream
+x-vercel-ai-ui-message-stream: v1
+cache-control: no-cache
+x-accel-buffering: no
+```
+
+`x-accel-buffering` matters in deployment: a reverse proxy that buffers the body
+turns a stream into one late blob. The protocol-version header is what the
+client is written against — but the SDK's transport does not read it back, so it
+does not need adding to the CORS `expose_headers`.
+
+Parts, verified against `ai@7.0.107` (`UIMessageChunk` in `node_modules/ai/dist`):
+
+```text
+data: {"type":"start","messageId":"…"}
+data: {"type":"text-start","id":"…"}
+data: {"type":"text-delta","id":"…","delta":"Gross "}
+data: {"type":"text-end","id":"…"}
+data: {"type":"finish"}
+data: [DONE]
+```
+
+The `id` on the text parts scopes a block of text within one message, so a
+single-block answer reuses the message id. `[DONE]` is what the SDK's own server
+sends; its parser skips the frame. The part names move between SDK releases —
+`tests/chat/test_streaming.py` pins them.
 
 Streaming responsibilities:
 
 - Send text deltas as the answer is generated.
 - Send citation/source metadata as structured parts once available.
-- Send clear error events for authentication failures, missing threads, retrieval failures, and grounding failures.
-- Persist only after the assistant run completes successfully, unless a separate partial-message model is deliberately introduced later.
+- Report failures as `{"type":"error","errorText":"…"}`. Authentication, a
+  missing thread and a foreign thread all resolve before the first byte and stay
+  real status codes (401/404/403); anything after that cannot, because the
+  status line is gone. `useChat` surfaces an error part on `error` and stops.
+- Persist only after the assistant run completes successfully, unless a separate
+  partial-message model is deliberately introduced later. Persistence therefore
+  runs *before* `finish` is sent: a write that failed afterwards could no longer
+  be reported. The cost is that a failed turn also drops the user's question.
+- Store the question and the answer in one insert, so a turn is kept whole or not
+  at all — two writes would leave an unanswered question behind whenever the
+  second failed, or the browser left between them. A new thread's title is
+  written first, so the turn itself is the last write that can fail, and an
+  `error` part always means nothing of the turn was stored.
+
+Threads are created untitled and named from their first question, so the sidebar
+has something to show. `chat_threads.updated_at` is moved by database triggers
+(migrations 0002 and 0003) rather than by the orchestrator — a trigger is the
+only place the rule holds for every writer.
 
 ## Data Model
 

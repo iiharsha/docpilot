@@ -5,6 +5,7 @@ token against Supabase Auth before the request reaches retrieval or the LLM.
 An unauthenticated request costs one call to Supabase and nothing else.
 """
 
+from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
 
@@ -55,14 +56,23 @@ async def get_access_token(
 
 async def get_user_client(
     access_token: Annotated[str, Depends(get_access_token)],
-) -> AsyncClient:
+) -> AsyncIterator[AsyncClient]:
     """The caller's Supabase client, so RLS scopes every query to them.
 
     Not proof of authentication by itself — routes depend on `get_current_user`
     for that. FastAPI caches dependencies per request, so the two share one
     client rather than opening a second connection pool.
     """
-    return await create_user_client(access_token)
+    client = await create_user_client(access_token)
+    try:
+        yield client
+    finally:
+        # One client, two lazily-built httpx pools: `auth` opens on the token
+        # check, `postgrest` on the first query. Both have to be closed or the
+        # sockets outlive the request. Closing an unused one costs nothing —
+        # constructing an httpx client opens no connection.
+        await client.auth.close()
+        await client.postgrest.aclose()
 
 
 async def get_current_user(
@@ -92,7 +102,7 @@ async def get_current_user(
     if not response.user.email:
         raise _unauthorized("Account has no email address")
 
-    user = AuthenticatedUser(id=response.user.id, email=response.user.email)
+    user = AuthenticatedUser(id=UUID(str(response.user.id)), email=response.user.email)
 
     # `public.users` is provisioned here rather than by a trigger on
     # `auth.users`, per the decision recorded in architecture.md. Nothing the

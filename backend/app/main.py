@@ -10,8 +10,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.chat import router as chat_router
+from app.api.threads import router as threads_router
 from app.config import settings
 from app.database.supabase import create_service_client
+from app.errors import register_exception_handlers
 
 
 def configure_logging() -> None:
@@ -58,7 +61,13 @@ app.add_middleware(
 )
 
 
+# Every route reaches Supabase, so the failure modes of that call are handled
+# once here rather than in each of them.
+register_exception_handlers(app)
+
 app.include_router(auth_router)
+app.include_router(chat_router)
+app.include_router(threads_router)
 
 
 @app.get("/health")

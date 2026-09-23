@@ -68,7 +68,7 @@ async function readBody(response: Response): Promise<unknown> {
   }
 }
 
-function errorMessage(detail: unknown, fallback: string): string {
+export function errorMessage(detail: unknown, fallback: string): string {
   if (typeof detail === 'string' && detail.trim() !== '') return detail
 
   // FastAPI reports failures as {"detail": ...}.
