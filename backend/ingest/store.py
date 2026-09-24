@@ -9,13 +9,12 @@ a filing that is briefly missing is one an analyst's question can miss.
 
 import uuid
 from typing import Any
-from urllib.parse import urlsplit
 
 from sqlalchemy import Connection, Engine, create_engine, delete, func, insert, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.pool import NullPool
 
-from app.config import settings
+from app.database.engine import session_database_url
 from app.database.models import DocumentChunk, SourceDocument
 from ingest.chunker import Chunk
 from ingest.metadata import Filing
@@ -25,21 +24,12 @@ _CHUNKS = DocumentChunk.__table__
 
 
 def create_ingest_engine() -> Engine:
-    """An engine on `DATABASE_URL`, which must be a session connection.
+    """A synchronous engine on `DATABASE_URL`, which must be a session connection.
 
-    psycopg prepares a statement once it has run a few times on a connection,
-    and Supabase's transaction pooler (port 6543) hands the next transaction a
-    different server connection, where that statement does not exist. The same
-    rule as `alembic/env.py`, for a different reason.
+    psycopg's prepared statements do not survive the transaction pooler; see
+    `session_database_url`.
     """
-    url = urlsplit(settings.database_url)
-    if url.hostname and "pooler.supabase.com" in url.hostname and url.port == 6543:
-        raise RuntimeError(
-            "DATABASE_URL points at the Supabase transaction pooler (port 6543). "
-            "Ingestion needs a session connection: the session pooler (port 5432) "
-            "or the direct connection (db.<project-ref>.supabase.co:5432)."
-        )
-    return create_engine(settings.sqlalchemy_database_url, poolclass=NullPool)
+    return create_engine(session_database_url(), poolclass=NullPool)
 
 
 def document_row(filing: Filing, markdown: str) -> dict[str, Any]:

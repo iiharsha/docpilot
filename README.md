@@ -73,3 +73,10 @@ Then load the filings into the database — Markdown, chunks and embeddings — 
 uv run python -m ingest --dry-run   # parse and chunk only; prints what each filing produced
 uv run python -m ingest             # embed and store all 25 (a few minutes, about $0.04)
 ```
+
+To check retrieval against the brief's ten questions, again from `backend/` (about a minute; see
+"Retrieval Evaluation" in [docs/architecture.md](docs/architecture.md)):
+
+```bash
+uv run python -m evals.brief        # recall per question and filing, and where each miss is
+```

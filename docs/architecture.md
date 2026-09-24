@@ -70,7 +70,8 @@ Backend:
 - OpenAI SDK for generation and embeddings
 - Supabase Python client for server-side database access
 - SQLAlchemy models + Alembic migrations for schema management; SQLAlchemy
-  also carries ingestion's writes (see [Corpus Ingestion](#corpus-ingestion))
+  also carries ingestion's writes and retrieval's reads (see [Corpus
+  Ingestion](#corpus-ingestion) and [Retrieval Strategy](#retrieval-strategy))
 - Supabase `pgvector` for semantic search
 - Postgres full-text search for lexical retrieval
 - `httpx` for outbound HTTP
@@ -87,7 +88,7 @@ The frontend is responsible for user interaction, local UI state, and sending th
 
 The backend is responsible for request authorization, retrieval, prompt construction, LLM execution, citation validation, streaming responses, and durable persistence. It owns all privileged credentials and is the only service allowed to use the Supabase service-role key.
 
-Supabase is responsible for authentication and durable product state. Browser access uses the anon key and user JWT. Server access uses either the user's bearer token for user-scoped operations or the service-role key for privileged writes that must still be explicitly tied to the authenticated user.
+Supabase is responsible for authentication and durable product state. Browser access uses the anon key and user JWT. Server access uses either the user's bearer token for user-scoped operations or the service-role key for privileged writes that must still be explicitly tied to the authenticated user. The filing corpus is the exception: the backend reads and writes it over its own Postgres connection (`DATABASE_URL`), which no user's key can reach.
 
 ## Request Flow
 
@@ -167,11 +168,17 @@ backend/app/
 │   └── validator.py            # Ensures citations map to retrieved passages
 └── database/
     ├── supabase.py             # Supabase client construction
+    ├── engine.py               # SQLAlchemy engine over `DATABASE_URL`, and the
+    │                           # session-connection guard Alembic and ingestion share
     ├── models/                 # SQLAlchemy table models used by Alembic autogenerate,
     │                           # one module per table over a shared `base.py`
     ├── chats.py                # Chat, thread, message, and citation persistence
-    └── documents.py            # Source document and chunk reads, and search queries
+    └── documents.py            # Filing and chunk reads: slice lookup, and each
+                                # passage with its context
 ```
+
+The retrieval eval lives beside `app/`, like ingestion: `backend/evals/` (see
+[Retrieval Evaluation](#retrieval-evaluation)).
 
 Ingestion is not part of the app: it is a CLI in `backend/ingest/`, beside `app/`
 (see [Corpus Ingestion](#corpus-ingestion)).
@@ -258,15 +265,125 @@ data/downloads/*.htm      inline-XBRL XHTML, one 10-K each
 
 ## Retrieval Strategy
 
-Docpilot uses hybrid retrieval:
+Docpilot uses hybrid retrieval, fanned out by filing. `retrieve(query, slices)`
+in `app/retrieval/retriever.py` takes a query and the slices it concerns — a
+slice is one company's filing for one fiscal year, `(ticker, fiscal_year,
+form_type)` — and runs the whole search once per slice:
 
-1. Embed the user's query with the configured OpenAI embedding model.
-2. Run a semantic search over `document_chunks.embedding` with `pgvector`.
-3. Run a lexical search over `document_chunks.search_vector` with Postgres full-text search.
-4. Fuse the two ranked lists in Python with Reciprocal Rank Fusion.
-5. Fetch the selected chunks, source document metadata, and optional neighboring chunks for grounding.
+1. Embed the query with the configured OpenAI embedding model, the one the corpus was embedded with.
+2. Resolve each slice through `source_documents (ticker, fiscal_year)` to its filing. A slice the corpus has no filing for comes back with no filing and no passages, rather than disappearing.
+3. Rank each filing's chunks twice: by cosine distance over `document_chunks.embedding` with `pgvector`, and by full-text match over `document_chunks.search_vector`. Each is one statement for every filing — a lateral join runs a bounded top-n per filing — so a query over twenty filings costs one round trip per search.
+4. Fuse each filing's two rankings in Python with Reciprocal Rank Fusion.
+5. Read the best `k` with their context (`app/database/documents.py`): the filing's metadata but never its Markdown, the chunk either side of each, and every part of a split table, since a later piece repeats the header but not the rows above it.
 
-This keeps the database responsible for efficient ranked retrieval and keeps the application responsible for product-specific ranking policy. The first implementation should avoid agent-generated SQL; the PydanticAI agent receives bounded tools such as `search_filings`, `read_chunk`, and `read_surrounding_chunks`.
+The reasons behind each step:
+
+- **Fan out, because flat top-k silently narrows.** One top-k over the corpus
+  clusters on the one or two filings that match best, and "across Apple's
+  2021–2025 10-Ks" gets answered from two years. Per-slice results make the
+  coverage explicit. Which slices a question needs is the caller's decision:
+  the eval names them per question, and M4's `search_filings` tool chooses them.
+- **Search each topic, not only the question.** A question that names several
+  topics ("demand drivers, customer concentration, and supply constraints")
+  embeds as an average of them, so passages about any one rank below passages
+  touching several. Searched as written, the brief's ten questions find 163 of
+  the eval's 215 evidence strings; with one more search per topic they name,
+  210. The agent is to search the same way, and to search for a statement line
+  item by its own name ("cash flow statement: purchases of property and
+  equipment"), since no cash flow statement says "capital expenditures".
+- **Keyword search ORs the query's words**, ranked by `ts_rank_cd`.
+  `plainto_tsquery` and `websearch_to_tsquery` both require every word, and no
+  passage contains every word of a whole question: brief question 1 matches
+  nothing either way. Words are split on anything but letters and digits first,
+  because Postgres parses "subscriptions/platforms/devices" as a single file-path
+  lexeme. Stemming and stop words are left to the `english` configuration the
+  index was built with. Ranked without IDF, OR-ed words reward a chunk for
+  repeating any of them, however common, which is why semantic rank counts
+  double in the fusion (see [Retrieval Evaluation](#retrieval-evaluation)).
+- **`SET LOCAL hnsw.iterative_scan = relaxed_order`** runs in the vector
+  search's transaction. The HNSW index (pgvector 0.8.2) filters after it
+  searches. On a plan that scans the index for one filing's chunks, it finds
+  the corpus's 40 nearest (`hnsw.ef_search`) and keeps that filing's few: across
+  all 25 filings, 40 chunks came back in total. An iterative scan keeps going
+  until each filing has its `k`. Left to itself, the planner currently scans each
+  filing's chunks exactly instead, but that is a plan choice, not a guarantee.
+  `tests/retrieval/test_live_search.py` forces the index plan and holds every
+  filing to a full `k`.
+- **Filters sit on the filing, not the chunk.** A slice resolves to a
+  `document_id`, which the chunk searches filter on through
+  `uq_document_chunks_document_id_chunk_index`. Each chunk's `metadata` repeats
+  `ticker`, `fiscal_year` and `form_type` for anything that needs a JSONB filter
+  (`fiscal_year` is an integer, and `@>` compares types).
+- **NVIDIA's financial statements are in Item 15**, not Item 8: its Item 8 is
+  one sentence pointing there. Nothing may narrow a financial question to
+  Item 8. NVIDIA's capital expenditures and customer concentration, in the
+  eval, are found in Item 15.
+
+This keeps the database responsible for efficient ranked retrieval and the application responsible for product-specific ranking policy. The first implementation avoids agent-generated SQL; the PydanticAI agent receives bounded tools such as `search_filings`, `read_chunk`, and `read_surrounding_chunks`.
+
+## Retrieval Evaluation
+
+`backend/evals/brief.py` is retrieval's regression net. It holds the brief's ten
+questions exactly as the brief words them, the filings each concerns, and, for
+each filing, the evidence an analyst would need. That is a figure where the
+answer is a number, or a sentence where it is a disclosure, copied from the
+filing: Apple FY2024's "201,183" is iPhone net sales. Evidence is text, not chunk
+ids, because ids change on every re-ingest. There are 215 strings over 76 filing
+searches, and every run also checks each string against its own filing, so a
+typo cannot pass for a retrieval miss. `evals/harness.py` does the scoring.
+
+```bash
+uv run python -m evals.brief          # recall per question and filing, the rank of each find, where each miss is
+uv run python -m evals.brief --k 12   # the same at another k
+uv run pytest -m integration          # holds each question to its minimum
+```
+
+A string counts as found when a returned passage or its context holds it, since
+M4's model reads both. **Any change to chunking or retrieval re-runs the eval**,
+and a question that falls below its `minimum` fails `tests/evals/test_brief.py`.
+
+The values in `app/retrieval/retriever.py` were tuned on 2026-09-24. Each
+filing's full semantic and keyword rankings were replayed offline, every
+setting was re-scored, and the choice was confirmed live (210 of 215, as
+replayed):
+
+| Setting | Value | Why |
+|---|---|---|
+| `K`, passages per filing and search | 10 | 201 of 215 at 8, 210 at 10, 213 at 12, 214 at 16. Each passage added costs about 850 tokens per filing, context included |
+| `CANDIDATES`, each search's top-n before fusion | 20 | Best at `k` 10 and 12 (210, 213). At 30, keyword matches on common words crowd out better semantic ones: 202 at `k` 10 |
+| `SEMANTIC_WEIGHT` / `KEYWORD_WEIGHT` | 2 / 1 | Equal weights find 205 at `k` 10, and anything from 1.5 to 3 finds 210–212. Question 9 is the swing, 10 of 15 against 15: its geography tables are the top semantic match but a middling keyword one |
+| `fusion.K`, RRF's own `k` | 60 | 10, 30 and 60 land within two strings of each other; 60 is the published default |
+| Chunk size | ~500 tokens, 800 max: unchanged | Re-chunked offline at 300/500 and at 800/1,200, and embedded afresh. At this cost it is a wash: 211 of 215 in 17,300 tokens per filing (300/500, `k` 20), 203 in 17,000 (800/1,200, `k` 6), against 210 in 16,000 now. Smaller chunks win on a tighter budget: 205 in 12,600 tokens, against 191 in 12,000 |
+
+What else the tuning showed:
+
+- Searched as written, keyword rank adds little: the best hybrid setting found
+  168 of 215 at `k` 8 and semantic rank alone 166. With topic searches it pulls
+  its weight: "purchase commitments" puts every company's commitments at keyword
+  rank 1–5. Dropping corpus-common words from the OR query (those in more than 2
+  to 50% of chunks) did not help, at best 174 at `k` 10.
+- The context read with each passage roughly doubles what comes back (16,000
+  tokens per filing at `k` 10, against 8,800 for the passages alone) and adds 8
+  strings. At equal cost, more passages would find more: 208 at `k` 16 with no
+  context, in 12,700 tokens. Split-table parts add nothing measurable on this
+  corpus, because its split tables have two or three pieces and the neighbours
+  already cover them.
+- Known misses at `k` 10, each recorded beside its question's `minimum`: NVIDIA
+  FY2021's and FY2023's "No customer represented 10% or more of total revenue"
+  (question 3). A sentence that there is no concentration ranks below the
+  passages that describe customers. Also Apple FY2022's Digital Markets Act
+  sentence and Apple FY2025's export controls, which sit in a risk factor about
+  hiring (question 6), and NVIDIA FY2023's margin decline from inventory charges
+  (question 10).
+
+That cost is what M4 inherits. A single-search question returns 8,000–9,500
+tokens per filing: about 40,000 for five filings. The multi-topic questions
+return far more: question 8 about 480,000 (20 filings, 3 searches), question 6
+about 410,000 (25 filings, 6 searches), question 10 about 290,000. The agent's
+per-question budget, the "multi-year fan-out cost" question in `todos.md`, has to
+cut that. The levers, with their scores above: fewer passages per topic search,
+context on request through `read_surrounding_chunks` rather than every time, or
+smaller chunks.
 
 ## Supabase and FastAPI Communication
 
@@ -287,6 +404,7 @@ Backend rules:
 - Derive `user_id` and email from the verified Supabase user.
 - Use user-scoped database operations wherever possible.
 - Use the service-role key only on the backend for privileged writes that cannot be safely performed with the anon key.
+- The filing corpus is the one exception to both rules, and it is readable by the backend only. `source_documents` and `document_chunks` have RLS enabled and no read policies, so no user's key reaches them. Retrieval reads them over the backend's own connection (`DATABASE_URL`, `app.state.database_engine`), which is also how ingestion writes them. It is no one user's data, so there is nothing to scope a read to.
 - Always attach persisted chat records to the authenticated `user_id`.
 
 The backend can verify the JWT by calling Supabase Auth's user endpoint or by validating the project's JWT signing keys. For the first implementation, calling Supabase Auth is simpler and avoids local JWT validation mistakes. If request volume grows, local JWT verification can be added behind the same `AuthService` interface.
@@ -404,7 +522,7 @@ A `public.users` row is created by a backend upsert on the first authenticated r
 - token count
 - metadata JSON: the retrieval filters `ticker`, `company`, `form_type`, `fiscal_year` (an integer — JSONB `@>` compares types) and `accession`; `chunk_type` (`text` or `table`), with `table_part` / `table_parts` on the pieces of a split table; and the source offsets `prefix_len`, `start`, `end`
 
-Hybrid retrieval runs two bounded queries against `document_chunks`: a semantic `pgvector` query and a Postgres full-text query. The backend fuses those ranked lists with Reciprocal Rank Fusion, then fetches the selected chunks and neighboring context for grounding.
+How retrieval uses these columns is in [Retrieval Strategy](#retrieval-strategy).
 
 ## Schema Management
 
@@ -427,9 +545,10 @@ Normal tables and ordinary indexes should be represented in SQLAlchemy models wh
 - HNSW indexes for vector search
 - GIN indexes for full-text search and JSON metadata
 - RLS enablement and policies
+- functions and triggers, such as the `chat_threads.updated_at` triggers in migrations 0002 and 0003
 - grants or Supabase role-specific permissions
 
-Alembic must connect with Supabase's direct/session database connection string. Do not run migrations through the transaction pooler URL, because schema migrations, extension setup, and index creation require session-level database behavior.
+Alembic must connect with Supabase's direct/session database connection string. Do not run migrations through the transaction pooler URL, because schema migrations, extension setup, and index creation require session-level database behavior. `session_database_url()` in `app/database/engine.py` refuses it, and Alembic, ingestion and the app all take their URL from there; the latter two need a session connection for psycopg's prepared statements.
 
 ## Grounding and Citation Policy
 

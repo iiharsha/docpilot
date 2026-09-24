@@ -5,13 +5,12 @@ wires Alembic to them and to the database URL from `app.config.settings`.
 """
 
 from logging.config import fileConfig
-from urllib.parse import urlsplit
 
 from alembic import context
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import create_engine, pool
 
-from app.config import settings
+from app.database.engine import session_database_url
 from app.database.models import Base
 
 config = context.config
@@ -20,20 +19,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Schema migrations, `create extension`, and index builds need a session
-# connection. Supabase's transaction pooler (port 6543) silently breaks all
-# three; its session pooler (5432) and the direct connection are both fine.
-_url = urlsplit(settings.database_url)
-if _url.hostname and "pooler.supabase.com" in _url.hostname and _url.port == 6543:
-    raise RuntimeError(
-        "DATABASE_URL points at the Supabase transaction pooler (port 6543). "
-        "Alembic needs a session connection: use the session pooler (port 5432) "
-        "or the direct connection (db.<project-ref>.supabase.co:5432)."
-    )
-
+# connection, so this refuses Supabase's transaction pooler (port 6543).
+#
 # The URL never lives in alembic.ini, and is never written into it either:
 # `settings` is the single source of env, and a `%` from a URL-encoded password
 # would be read as configparser interpolation syntax.
-DATABASE_URL = settings.sqlalchemy_database_url
+DATABASE_URL = session_database_url()
 
 target_metadata = Base.metadata
 

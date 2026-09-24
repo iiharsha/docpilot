@@ -44,6 +44,7 @@ backend/
 │   ├── database/        # SQLAlchemy models, Supabase client wrapper, typed query helpers
 │   └── prompts/         # prompt/instruction templates if not colocated with assistant
 ├── ingest/              # one-off ingestion scripts (Markdown extraction, chunking, embedding, Supabase writes)
+├── evals/               # retrieval eval over the brief's ten questions (`python -m evals.brief`)
 ├── tests/
 └── pyproject.toml
 ```

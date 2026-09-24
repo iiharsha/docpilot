@@ -10,10 +10,8 @@ import uuid
 from datetime import date
 from types import SimpleNamespace
 
-import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.config import settings
 from ingest import store
 from ingest.chunker import Chunk
 from ingest.metadata import Filing
@@ -113,14 +111,3 @@ def test_chunk_rows_carry_the_metadata_retrieval_filters_on():
         "66",
         [0.2],
     )
-
-
-def test_the_transaction_pooler_is_refused(monkeypatch):
-    monkeypatch.setattr(
-        settings,
-        "database_url",
-        "postgresql://postgres.ref:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres",
-    )
-
-    with pytest.raises(RuntimeError, match="transaction pooler"):
-        store.create_ingest_engine()

@@ -13,6 +13,7 @@ from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.threads import router as threads_router
 from app.config import settings
+from app.database.engine import create_database_engine
 from app.database.supabase import create_service_client
 from app.errors import register_exception_handlers
 
@@ -48,7 +49,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # One privileged client per process. Construction is local — it opens no
     # connection — so startup does not depend on Supabase being reachable.
     app.state.supabase_service = await create_service_client()
+    # The same holds for the engine: its pool connects on first use. It is
+    # what reads the filing corpus (see `database/documents.py`).
+    app.state.database_engine = create_database_engine()
     yield
+    await app.state.database_engine.dispose()
 
 
 app = FastAPI(title="Docpilot API", lifespan=lifespan)
